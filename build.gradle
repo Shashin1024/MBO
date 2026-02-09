@@ -1,0 +1,46 @@
+plugins {
+    id 'java'
+}
+
+group 'com.shashin'
+version '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+    maven {
+        url "http://maven.bookmap.com/maven2/releases/"
+        allowInsecureProtocol = true
+    }
+}
+
+dependencies {
+    compileOnly fileTree(dir: 'C:/Program Files/Bookmap/lib', include: ['*.jar'])
+
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+// CRITICAL: This tells Gradle to create the plugin descriptor
+// that Bookmap needs to find your entry point
+tasks.withType(JavaCompile) {
+    options.compilerArgs << '-parameters'
+}
+
+// Create a proper JAR with metadata
+jar {
+    manifest {
+        attributes(
+                'Implementation-Title': project.name,
+                'Implementation-Version': project.version
+        )
+    }
+
+    // Ensure source compatibility
+    from sourceSets.main.output
+}
