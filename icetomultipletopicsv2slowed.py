@@ -898,8 +898,8 @@ alias_to_mbo_book = {}
 mt5_price_provider = None
 
 # Configuration - UPDATE WITH YOUR CREDENTIALS
-BOT_TOKEN = "7654018525:AAFUdkMmAcxjr46PI2SHcC5t5TC07tDXPVo"
-CHAT_ID = "-1002971134101"
+BOT_TOKEN = ""
+CHAT_ID = ""
 
 # Topic IDs for different message types
 TOPIC_DETECTIONS = 12355    # Iceberg Detections
