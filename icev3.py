@@ -289,8 +289,8 @@ def handle_mbo_event(addon, alias, event_type, order_id, price, size, trader_id=
 # --- Global Boilerplate ---
 alias_to_detector = {}
 mt5_price_provider = None
-BOT_TOKEN = "7654018525:AAFUdkMmAcxjr46PI2SHcC5t5TC07tDXPVo"
-CHAT_ID = "-1002971134101"
+BOT_TOKEN = ""
+CHAT_ID = ""
 TOPICS = {'detections': 12355, 'updates': 12359, 'full_executions': 12362}
 
 def handle_subscribe_instrument(addon, alias, full_name, is_crypto, pips, size_multiplier, instrument_multiplier, supported_features):
