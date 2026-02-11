@@ -200,6 +200,10 @@ public class BidAskWindow extends JFrame {
         private long panStartTimeOffset;
         private double panStartPriceOffset;
 
+        // mouse tracking for hover tooltip
+        private int mouseX = -1;
+        private int mouseY = -1;
+
         BidAskPanel() {
             setBackground(settings.chartBackground);
 
@@ -296,6 +300,13 @@ public class BidAskWindow extends JFrame {
                         repaint();
                     }
                 }
+
+                @Override
+                public void mouseMoved(MouseEvent e) {
+                    mouseX = e.getX();
+                    mouseY = e.getY();
+                    repaint();
+                }
             };
 
             addMouseListener(mouseHandler);
@@ -311,14 +322,13 @@ public class BidAskWindow extends JFrame {
             double minP = Double.MAX_VALUE;
             double maxP = -Double.MAX_VALUE;
             synchronized (timestamps) {
-                for (int i = 0; i < timestamps.size(); i++) {
-                    long t = timestamps.get(i);
-                    if (t >= startTime && t <= endTime) {
-                        double bid = bidPrices.get(i);
-                        double ask = askPrices.get(i);
-                        minP = Math.min(minP, Math.min(bid, ask));
-                        maxP = Math.max(maxP, Math.max(bid, ask));
-                    }
+                int idxStart = lowerBound(timestamps, startTime);
+                int idxEnd = Math.min(lowerBound(timestamps, endTime + 1), timestamps.size());
+                for (int i = idxStart; i < idxEnd; i++) {
+                    double bid = bidPrices.get(i);
+                    double ask = askPrices.get(i);
+                    minP = Math.min(minP, Math.min(bid, ask));
+                    maxP = Math.max(maxP, Math.max(bid, ask));
                 }
             }
             if (minP >= maxP) return pips * 20;
@@ -365,18 +375,19 @@ public class BidAskWindow extends JFrame {
                 long endTime = now - timeOffset;
                 long startTime = endTime - visibleMs;
 
-                // find auto-fit price range over visible window
+                // find auto-fit price range over visible window (binary search for range)
+                int idxStart = lowerBound(timestamps, startTime);
+                int idxEnd = Math.min(lowerBound(timestamps, endTime + 1), timestamps.size());
+
                 double minPrice = Double.MAX_VALUE;
                 double maxPrice = -Double.MAX_VALUE;
 
-                for (int i = 0; i < timestamps.size(); i++) {
-                    long t = timestamps.get(i);
-                    if (t >= startTime && t <= endTime) {
-                        double bid = bidPrices.get(i);
-                        double ask = askPrices.get(i);
-                        minPrice = Math.min(minPrice, Math.min(bid, ask));
-                        maxPrice = Math.max(maxPrice, Math.max(bid, ask));
-                    }
+                // scan all visible points — only arithmetic, no graphics, so fast enough
+                for (int i = idxStart; i < idxEnd; i++) {
+                    double bid = bidPrices.get(i);
+                    double ask = askPrices.get(i);
+                    minPrice = Math.min(minPrice, Math.min(bid, ask));
+                    maxPrice = Math.max(maxPrice, Math.max(bid, ask));
                 }
 
                 if (minPrice >= maxPrice) {
@@ -408,8 +419,13 @@ public class BidAskWindow extends JFrame {
                         askPrices, settings.askLineColor);
 
                 // draw completed iceberg diamonds on top (V2 then V3)
-                drawIcebergBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange);
-                drawV3IcebergBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange);
+                List<DiamondInfo> allDiamonds = new ArrayList<>();
+                allDiamonds.addAll(drawIcebergBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange));
+                allDiamonds.addAll(drawV3IcebergBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange));
+
+                // collision-avoidance labels, then hover tooltip
+                drawLabelsWithCollisionAvoidance(g2, allDiamonds);
+                drawHoverTooltip(g2, allDiamonds);
 
                 // current price markers on the right edge
                 if (!bidPrices.isEmpty()) {
@@ -443,6 +459,22 @@ public class BidAskWindow extends JFrame {
             }
         }
 
+        // info collected per visible diamond for label placement and tooltip
+        private static class DiamondInfo {
+            int cx, cy, r;
+            String label;
+            boolean isV3;
+            boolean isBid;
+            double volume;
+            double execRatio;
+
+            DiamondInfo(int cx, int cy, int r, String label, boolean isV3, boolean isBid, double volume, double execRatio) {
+                this.cx = cx; this.cy = cy; this.r = r;
+                this.label = label; this.isV3 = isV3; this.isBid = isBid;
+                this.volume = volume; this.execRatio = execRatio;
+            }
+        }
+
         private int diamondRadius(double volume) {
             double minVol = settings.diamondMinVolume;
             double maxVol = settings.diamondMaxVolume;
@@ -454,13 +486,14 @@ public class BidAskWindow extends JFrame {
             return (int) (minR + norm * (maxR - minR));
         }
 
-        private void drawIcebergBubbles(Graphics2D g2, int chartW, int chartH,
+        private List<DiamondInfo> drawIcebergBubbles(Graphics2D g2, int chartW, int chartH,
                                          long startTime, long endTime,
                                          double minPrice, double priceRange) {
+            List<DiamondInfo> result = new ArrayList<>();
             long timeRange = endTime - startTime;
 
             synchronized (icebergTimes) {
-                if (icebergTimes.isEmpty()) return;
+                if (icebergTimes.isEmpty()) return result;
 
                 for (int i = 0; i < icebergTimes.size(); i++) {
                     long t = icebergTimes.get(i);
@@ -486,28 +519,23 @@ public class BidAskWindow extends JFrame {
                     g2.setStroke(new BasicStroke(2f));
                     g2.draw(diamond);
 
-                    // label: volume + exec ratio
-                    g2.setFont(new Font("SansSerif", Font.BOLD, settings.diamondLabelFontSize));
-                    FontMetrics fm = g2.getFontMetrics();
                     String volStr = formatVolumeDouble(volume);
                     String ratioStr = String.format("%.1fx", execRatio);
                     String label = volStr + " | " + ratioStr;
-                    int labelW = fm.stringWidth(label);
-
-                    // label above the diamond
-                    g2.setColor(Color.WHITE);
-                    g2.drawString(label, cx - labelW / 2, cy - r - 4);
+                    result.add(new DiamondInfo(cx, cy, r, label, false, isBid, volume, execRatio));
                 }
             }
+            return result;
         }
 
-        private void drawV3IcebergBubbles(Graphics2D g2, int chartW, int chartH,
+        private List<DiamondInfo> drawV3IcebergBubbles(Graphics2D g2, int chartW, int chartH,
                                             long startTime, long endTime,
                                             double minPrice, double priceRange) {
+            List<DiamondInfo> result = new ArrayList<>();
             long timeRange = endTime - startTime;
 
             synchronized (v3Times) {
-                if (v3Times.isEmpty()) return;
+                if (v3Times.isEmpty()) return result;
 
                 for (int i = 0; i < v3Times.size(); i++) {
                     long t = v3Times.get(i);
@@ -533,17 +561,124 @@ public class BidAskWindow extends JFrame {
                     g2.setStroke(new BasicStroke(2f));
                     g2.draw(diamond);
 
-                    // label: "V3" prefix + volume + exec ratio
-                    g2.setFont(new Font("SansSerif", Font.BOLD, settings.diamondLabelFontSize));
-                    FontMetrics fm = g2.getFontMetrics();
                     String volStr = formatVolumeDouble(volume);
                     String ratioStr = String.format("%.1fx", execRatio);
                     String label = "V3 " + volStr + " | " + ratioStr;
-                    int labelW = fm.stringWidth(label);
-
-                    g2.setColor(Color.WHITE);
-                    g2.drawString(label, cx - labelW / 2, cy - r - 4);
+                    result.add(new DiamondInfo(cx, cy, r, label, true, isBid, volume, execRatio));
                 }
+            }
+            return result;
+        }
+
+        private void drawLabelsWithCollisionAvoidance(Graphics2D g2, List<DiamondInfo> diamonds) {
+            if (diamonds.isEmpty()) return;
+
+            // sort by volume descending — largest diamonds get label priority
+            diamonds.sort((a, b) -> Double.compare(b.volume, a.volume));
+
+            g2.setFont(new Font("SansSerif", Font.BOLD, settings.diamondLabelFontSize));
+            FontMetrics fm = g2.getFontMetrics();
+            int fontH = fm.getHeight();
+
+            // placed label rectangles for collision checking
+            List<Rectangle> placed = new ArrayList<>();
+
+            for (DiamondInfo d : diamonds) {
+                int labelW = fm.stringWidth(d.label);
+                int labelX = d.cx - labelW / 2;
+
+                // try positions: above diamond, below diamond, then nudge further up/down
+                int[] offsets = new int[]{
+                    -(d.r + 4 + fontH),           // above diamond
+                    d.r + 4 + fm.getAscent(),     // below diamond
+                    -(d.r + 4 + fontH + fontH),   // further above
+                    d.r + 4 + fm.getAscent() + fontH, // further below
+                    -(d.r + 4 + fontH + fontH * 2),
+                    d.r + 4 + fm.getAscent() + fontH * 2
+                };
+
+                for (int offsetY : offsets) {
+                    int labelY = d.cy + offsetY;
+                    Rectangle rect = new Rectangle(labelX, labelY, labelW, fontH);
+
+                    boolean overlaps = false;
+                    for (Rectangle existing : placed) {
+                        if (rect.intersects(existing)) {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+
+                    if (!overlaps) {
+                        g2.setColor(Color.WHITE);
+                        g2.drawString(d.label, labelX, labelY + fm.getAscent());
+                        placed.add(rect);
+                        break;
+                    }
+                }
+                // if no position found, label is hidden — hover tooltip still works
+            }
+        }
+
+        private void drawHoverTooltip(Graphics2D g2, List<DiamondInfo> diamonds) {
+            if (mouseX < 0 || mouseY < 0 || diamonds.isEmpty()) return;
+
+            // find closest diamond within its bounding area
+            DiamondInfo hovered = null;
+            for (DiamondInfo d : diamonds) {
+                // diamond hit test: Manhattan distance (diamond shape)
+                int dx = Math.abs(mouseX - d.cx);
+                int dy = Math.abs(mouseY - d.cy);
+                if (dx + dy <= d.r + 4) { // small tolerance
+                    hovered = d;
+                    break;
+                }
+            }
+
+            if (hovered == null) return;
+
+            String type = hovered.isV3 ? "V3" : "V2";
+            String side = hovered.isBid ? "BID" : "ASK";
+            String vol = formatVolumeDouble(hovered.volume);
+            String ratio = String.format("%.1fx", hovered.execRatio);
+
+            String[] lines = {
+                type + " Iceberg",
+                "Side: " + side,
+                "Volume: " + vol,
+                "Exec Ratio: " + ratio
+            };
+
+            g2.setFont(new Font("SansSerif", Font.BOLD, 12));
+            FontMetrics fm = g2.getFontMetrics();
+            int lineH = fm.getHeight();
+            int pad = 6;
+            int maxW = 0;
+            for (String line : lines) {
+                maxW = Math.max(maxW, fm.stringWidth(line));
+            }
+            int boxW = maxW + pad * 2;
+            int boxH = lineH * lines.length + pad * 2;
+
+            // offset tooltip from cursor; keep within chart bounds
+            int tx = mouseX + 15;
+            int ty = mouseY - boxH - 5;
+            int panelW = getWidth();
+            int panelH = getHeight();
+            if (tx + boxW > panelW - 5) tx = mouseX - boxW - 15;
+            if (ty < 5) ty = mouseY + 15;
+            if (ty + boxH > panelH - 5) ty = panelH - boxH - 5;
+
+            // dark semi-transparent background
+            g2.setColor(new Color(20, 20, 30, 220));
+            g2.fillRoundRect(tx, ty, boxW, boxH, 8, 8);
+            g2.setColor(new Color(100, 100, 120));
+            g2.drawRoundRect(tx, ty, boxW, boxH, 8, 8);
+
+            // text lines
+            g2.setColor(Color.WHITE);
+            for (int i = 0; i < lines.length; i++) {
+                g2.drawString(lines[i], tx + pad, ty + pad + fm.getAscent() + i * lineH);
             }
         }
 
@@ -559,6 +694,17 @@ public class BidAskWindow extends JFrame {
 
         private int toX(long time, long startTime, long timeRange, int chartW) {
             return PAD_LEFT + (int) ((double) (time - startTime) / timeRange * chartW);
+        }
+
+        // binary search: first index where timestamps.get(i) >= target
+        private int lowerBound(List<Long> times, long target) {
+            int lo = 0, hi = times.size();
+            while (lo < hi) {
+                int mid = (lo + hi) >>> 1;
+                if (times.get(mid) < target) lo = mid + 1;
+                else hi = mid;
+            }
+            return lo;
         }
 
         private void drawGrid(Graphics2D g2, int chartW, int chartH,
@@ -607,27 +753,79 @@ public class BidAskWindow extends JFrame {
                                    double minPrice, double priceRange,
                                    List<Double> prices, Color color) {
             long timeRange = endTime - startTime;
+            if (timeRange <= 0) return;
             g2.setColor(color);
             g2.setStroke(new BasicStroke(2f));
+
+            int idxStart = lowerBound(timestamps, startTime);
+            int idxEnd = Math.min(lowerBound(timestamps, endTime + 1), timestamps.size());
+            int visibleCount = idxEnd - idxStart;
+            if (visibleCount < 1) return;
 
             Path2D path = new Path2D.Double();
             boolean started = false;
             int lastY = 0;
 
-            for (int i = 0; i < timestamps.size(); i++) {
-                long t = timestamps.get(i);
-                if (t < startTime) continue;
-                if (t > endTime) break;
+            if (visibleCount <= chartW * 2) {
+                // few enough points: draw every point directly
+                for (int i = idxStart; i < idxEnd; i++) {
+                    int x = toX(timestamps.get(i), startTime, timeRange, chartW);
+                    int y = toY(prices.get(i), minPrice, priceRange, chartH);
+                    lastY = y;
+                    if (!started) { path.moveTo(x, y); started = true; }
+                    else { path.lineTo(x, y); }
+                }
+            } else {
+                // min/max per pixel column — stable across frames
+                int prevX = -1;
+                double colMin = Double.MAX_VALUE, colMax = -Double.MAX_VALUE;
+                double colFirst = 0, colLast = 0;
+                boolean colHasData = false;
 
-                int x = toX(t, startTime, timeRange, chartW);
-                int y = toY(prices.get(i), minPrice, priceRange, chartH);
-                lastY = y;
+                for (int i = idxStart; i < idxEnd; i++) {
+                    int x = toX(timestamps.get(i), startTime, timeRange, chartW);
+                    double p = prices.get(i);
 
-                if (!started) {
-                    path.moveTo(x, y);
-                    started = true;
-                } else {
-                    path.lineTo(x, y);
+                    if (x != prevX && colHasData) {
+                        // emit previous column: first -> min -> max -> last
+                        int yFirst = toY(colFirst, minPrice, priceRange, chartH);
+                        int yMin = toY(colMin, minPrice, priceRange, chartH);
+                        int yMax = toY(colMax, minPrice, priceRange, chartH);
+                        int yLast = toY(colLast, minPrice, priceRange, chartH);
+
+                        if (!started) { path.moveTo(prevX, yFirst); started = true; }
+                        else { path.lineTo(prevX, yFirst); }
+                        path.lineTo(prevX, yMin);
+                        path.lineTo(prevX, yMax);
+                        path.lineTo(prevX, yLast);
+                        lastY = yLast;
+
+                        // reset column
+                        colMin = Double.MAX_VALUE;
+                        colMax = -Double.MAX_VALUE;
+                        colHasData = false;
+                    }
+
+                    if (!colHasData) { colFirst = p; }
+                    colLast = p;
+                    colMin = Math.min(colMin, p);
+                    colMax = Math.max(colMax, p);
+                    colHasData = true;
+                    prevX = x;
+                }
+                // emit final column
+                if (colHasData) {
+                    int yFirst = toY(colFirst, minPrice, priceRange, chartH);
+                    int yMin = toY(colMin, minPrice, priceRange, chartH);
+                    int yMax = toY(colMax, minPrice, priceRange, chartH);
+                    int yLast = toY(colLast, minPrice, priceRange, chartH);
+
+                    if (!started) { path.moveTo(prevX, yFirst); started = true; }
+                    else { path.lineTo(prevX, yFirst); }
+                    path.lineTo(prevX, yMin);
+                    path.lineTo(prevX, yMax);
+                    path.lineTo(prevX, yLast);
+                    lastY = yLast;
                 }
             }
 
@@ -642,35 +840,52 @@ public class BidAskWindow extends JFrame {
                                     long startTime, long endTime,
                                     double minPrice, double priceRange) {
             long timeRange = endTime - startTime;
-            List<int[]> pts = new ArrayList<>();
+            if (timeRange <= 0) return;
 
-            for (int i = 0; i < timestamps.size(); i++) {
-                long t = timestamps.get(i);
-                if (t < startTime) continue;
-                if (t > endTime) break;
+            int idxStart = lowerBound(timestamps, startTime);
+            int idxEnd = Math.min(lowerBound(timestamps, endTime + 1), timestamps.size());
+            int visibleCount = idxEnd - idxStart;
+            if (visibleCount < 2) return;
 
-                int x = toX(t, startTime, timeRange, chartW);
+            // collect one (askY, bidY) per pixel column using last value per column
+            // this is stable and produces at most chartW points
+            List<int[]> cols = new ArrayList<>(); // {x, askY, bidY}
+            int prevX = -1;
+            int curAskY = 0, curBidY = 0;
+
+            for (int i = idxStart; i < idxEnd; i++) {
+                int x = toX(timestamps.get(i), startTime, timeRange, chartW);
                 int yAsk = toY(askPrices.get(i), minPrice, priceRange, chartH);
                 int yBid = toY(bidPrices.get(i), minPrice, priceRange, chartH);
-                pts.add(new int[]{x, yAsk, yBid});
+
+                if (x != prevX && prevX >= 0) {
+                    cols.add(new int[]{prevX, curAskY, curBidY});
+                }
+                curAskY = yAsk;
+                curBidY = yBid;
+                prevX = x;
+            }
+            // emit final column
+            if (prevX >= 0) {
+                cols.add(new int[]{prevX, curAskY, curBidY});
             }
 
-            if (pts.size() < 2) return;
+            if (cols.size() < 2) return;
 
-            // extend last known values to the right edge
-            int[] last = pts.get(pts.size() - 1);
+            // extend to right edge
+            int[] last = cols.get(cols.size() - 1);
             int rightEdge = PAD_LEFT + chartW;
             if (last[0] < rightEdge) {
-                pts.add(new int[]{rightEdge, last[1], last[2]});
+                cols.add(new int[]{rightEdge, last[1], last[2]});
             }
 
             Path2D fill = new Path2D.Double();
-            fill.moveTo(pts.get(0)[0], pts.get(0)[1]);
-            for (int i = 1; i < pts.size(); i++) {
-                fill.lineTo(pts.get(i)[0], pts.get(i)[1]);
+            fill.moveTo(cols.get(0)[0], cols.get(0)[1]); // ask forward
+            for (int i = 1; i < cols.size(); i++) {
+                fill.lineTo(cols.get(i)[0], cols.get(i)[1]);
             }
-            for (int i = pts.size() - 1; i >= 0; i--) {
-                fill.lineTo(pts.get(i)[0], pts.get(i)[2]);
+            for (int i = cols.size() - 1; i >= 0; i--) { // bid backward
+                fill.lineTo(cols.get(i)[0], cols.get(i)[2]);
             }
             fill.closePath();
 

@@ -116,6 +116,14 @@ public class IcebergV3Detector {
             }
         }
 
+        // Final check: order might qualify at cancel time even if not detected earlier
+        if (!order.isConfirmedIceberg) {
+            double ratio = order.getExecutionRatio();
+            if (ratio >= settings.v3ExecRatioThreshold || order.totalFilled >= settings.v3TotalFilledThreshold) {
+                order.isConfirmedIceberg = true;
+            }
+        }
+
         if (order.isConfirmedIceberg) {
             order.completionTime = System.currentTimeMillis();
             confirmedIds.remove(orderId);
@@ -126,32 +134,36 @@ public class IcebergV3Detector {
     }
 
     // V3: Trade matching with active/passive distinction
+    // Python gets order IDs directly from trade events (passive_order_id, aggressor_order_id).
+    // Java API doesn't provide order IDs in trades, so we match by price + side.
+    // We attribute the FULL trade size to each matched order (same as Python).
     public void addTrade(int priceTicks, double actualSize, boolean isBidAggressor) {
         List<String> ordersAtPrice = ordersByPrice.get(priceTicks);
         if (ordersAtPrice == null || ordersAtPrice.isEmpty())
             return;
 
-        // Passive orders: resting on the opposite side of the aggressor
-        List<IcebergV3Order> passiveOrders = new ArrayList<>();
-        for (String oid : ordersAtPrice) {
-            IcebergV3Order order = activeOrders.get(oid);
-            if (order != null && order.isBid != isBidAggressor) {
-                passiveOrders.add(order);
-            }
-        }
+        long ts = System.currentTimeMillis();
 
-        if (!passiveOrders.isEmpty()) {
-            double execPerOrder = actualSize / passiveOrders.size();
-            for (IcebergV3Order order : passiveOrders) {
-                double exec = Math.min(execPerOrder, order.currentSize);
-                if (exec > 0) {
-                    order.addExecution(exec, System.currentTimeMillis(), false);
-                }
+        // Match passive orders: resting on the opposite side of the aggressor
+        // Match aggressor orders: on the same side as the aggressor
+        for (String oid : new ArrayList<>(ordersAtPrice)) {
+            IcebergV3Order order = activeOrders.get(oid);
+            if (order == null) continue;
+
+            if (order.isBid != isBidAggressor) {
+                // This order is PASSIVE (resting, got hit by aggressor)
+                order.addExecution(actualSize, ts, false);
+                analyzeIceberg(order);
+            } else {
+                // This order is the AGGRESSOR (it initiated the trade)
+                order.addExecution(actualSize, ts, true);
+                analyzeIceberg(order);
             }
         }
     }
 
-    // V3: Simple single-threshold detection
+    // V3: Simple threshold detection — marks as confirmed but does NOT emit diamond yet.
+    // Diamond is emitted on cancel (completion) with the full accumulated volume.
     private void analyzeIceberg(IcebergV3Order order) {
         if (order.isConfirmedIceberg)
             return;
@@ -160,9 +172,7 @@ public class IcebergV3Detector {
             order.isConfirmedIceberg = true;
             order.icebergStartTime = System.currentTimeMillis();
             confirmedIds.add(order.orderId);
-            if (onIcebergCompleted != null) {
-                onIcebergCompleted.accept(new CompletedIcebergV3(order, pips));
-            }
+            // Don't emit diamond here — wait for cancel to get full volume
         }
     }
 

@@ -50,8 +50,8 @@ public class IcebergSettings {
     public volatile double maxDistancePips = 50.0;
 
     // --- V3 Detection Thresholds ---
-    public volatile double v3ExecRatioThreshold = 40.0;
-    public volatile double v3TotalFilledThreshold = 80;
+    public volatile double v3ExecRatioThreshold = 10.0;
+    public volatile double v3TotalFilledThreshold = 10;
 
     // --- V3 Diamond Colors ---
     public volatile Color v3BidFill = new Color(50, 205, 50, 160);
