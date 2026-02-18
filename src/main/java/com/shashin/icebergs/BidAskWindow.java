@@ -8,6 +8,8 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
 public class BidAskWindow extends JFrame {
 
@@ -19,6 +21,10 @@ public class BidAskWindow extends JFrame {
     private final JLabel askLabel;
     private final JLabel spreadLabel;
     private SettingsWindow settingsWindow;
+
+    // order book depth references (shared with plugin, synchronized on each map)
+    private TreeMap<Integer, Integer> bidBook;
+    private TreeMap<Integer, Integer> askBook;
 
     private final List<Long> timestamps = new ArrayList<>();
     private final List<Double> bidPrices = new ArrayList<>();
@@ -37,6 +43,11 @@ public class BidAskWindow extends JFrame {
     private final List<Double> v3Volumes = new ArrayList<>();
     private final List<Double> v3ExecRatios = new ArrayList<>();
     private final List<Boolean> v3IsBid = new ArrayList<>();
+
+    // individual trade data for delta/volume aggregation
+    private final List<Long> tradeTimes = new ArrayList<>();
+    private final List<Double> tradeSizes = new ArrayList<>();
+    private final List<Boolean> tradeIsBuy = new ArrayList<>(); // true = buy aggressor
 
     // enough for a full trading session (~8+ hours at high frequency)
     private static final int MAX_POINTS = 1_000_000;
@@ -150,6 +161,26 @@ public class BidAskWindow extends JFrame {
         }
     }
 
+    public void addTrade(long time, double size, boolean isBuy) {
+        synchronized (tradeTimes) {
+            tradeTimes.add(time);
+            tradeSizes.add(size);
+            tradeIsBuy.add(isBuy);
+
+            if (tradeTimes.size() > MAX_POINTS) {
+                int excess = TRIM_BATCH;
+                tradeTimes.subList(0, excess).clear();
+                tradeSizes.subList(0, excess).clear();
+                tradeIsBuy.subList(0, excess).clear();
+            }
+        }
+    }
+
+    public void setDepthBooks(TreeMap<Integer, Integer> bidBook, TreeMap<Integer, Integer> askBook) {
+        this.bidBook = bidBook;
+        this.askBook = askBook;
+    }
+
     private void openSettings() {
         if (settingsWindow == null || !settingsWindow.isDisplayable()) {
             settingsWindow = new SettingsWindow(settings);
@@ -170,7 +201,7 @@ public class BidAskWindow extends JFrame {
         private static final int PAD_LEFT = 60;
         private static final int PAD_RIGHT = 15;
         private static final int PAD_TOP = 15;
-        private static final int PAD_BOTTOM = 25;
+        private static final int PAD_BOTTOM = 85;
 
         private static final double ZOOM_STEP = 1.15;
         private static final double MIN_ZOOM = 1e-6;
@@ -449,6 +480,19 @@ public class BidAskWindow extends JFrame {
                             PAD_LEFT + chartW + 2, yAsk + 4);
                 }
 
+                // delta/volume table below chart
+                drawDeltaVolumeTable(g2, chartW, chartH, startTime, endTime);
+
+                // high-volume depth table at top-right
+                drawDepthTable(g2);
+
+                // grid column width indicator (lower-left)
+                long colMs = (endTime - startTime) / 6;
+                String colLabel = formatDuration(colMs);
+                g2.setFont(new Font("SansSerif", Font.PLAIN, 10));
+                g2.setColor(new Color(140, 140, 150, 180));
+                g2.drawString(colLabel, PAD_LEFT + 4, PAD_TOP + chartH - 4);
+
                 // show "HISTORY" indicator when panned away from live
                 if (timeOffset > 0) {
                     g2.setFont(new Font("SansSerif", Font.BOLD, 11));
@@ -519,7 +563,7 @@ public class BidAskWindow extends JFrame {
                     g2.setStroke(new BasicStroke(2f));
                     g2.draw(diamond);
 
-                    String volStr = formatVolumeDouble(volume);
+                    String volStr = formatVolumeDouble(volume) + (isBid ? "B" : "S");
                     String ratioStr = String.format("%.1fx", execRatio);
                     String label = volStr + " | " + ratioStr;
                     result.add(new DiamondInfo(cx, cy, r, label, false, isBid, volume, execRatio));
@@ -561,7 +605,7 @@ public class BidAskWindow extends JFrame {
                     g2.setStroke(new BasicStroke(2f));
                     g2.draw(diamond);
 
-                    String volStr = formatVolumeDouble(volume);
+                    String volStr = formatVolumeDouble(volume) + (isBid ? "B" : "S");
                     String ratioStr = String.format("%.1fx", execRatio);
                     String label = "V3 " + volStr + " | " + ratioStr;
                     result.add(new DiamondInfo(cx, cy, r, label, true, isBid, volume, execRatio));
@@ -679,6 +723,194 @@ public class BidAskWindow extends JFrame {
             g2.setColor(Color.WHITE);
             for (int i = 0; i < lines.length; i++) {
                 g2.drawString(lines[i], tx + pad, ty + pad + fm.getAscent() + i * lineH);
+            }
+        }
+
+        private void drawDeltaVolumeTable(Graphics2D g2, int chartW, int chartH,
+                                          long startTime, long endTime) {
+            long timeRange = endTime - startTime;
+            if (timeRange <= 0) return;
+
+            int numV = 6; // same as drawGrid
+            int tableTop = PAD_TOP + chartH + 18; // below time axis labels
+            int rowH = 14;
+
+            g2.setFont(new Font("Monospaced", Font.BOLD, settings.deltaTableFontSize));
+            FontMetrics fm = g2.getFontMetrics();
+
+            String[] rowLabels = {"Delta", "Max \u0394", "Min \u0394", "Vol"};
+            Color labelColor = new Color(140, 140, 150);
+            Color posColor = new Color(0, 200, 100);
+            Color negColor = new Color(255, 70, 70);
+            Color zeroColor = new Color(120, 120, 130);
+
+            // draw row labels in PAD_LEFT area
+            for (int r = 0; r < rowLabels.length; r++) {
+                g2.setColor(labelColor);
+                g2.drawString(rowLabels[r], 2, tableTop + r * rowH + fm.getAscent());
+            }
+
+            // draw separator line between time axis and table
+            g2.setColor(new Color(60, 60, 70));
+            g2.drawLine(PAD_LEFT, tableTop - 3, PAD_LEFT + chartW, tableTop - 3);
+
+            synchronized (tradeTimes) {
+                for (int col = 0; col < numV; col++) {
+                    long colStart = startTime + timeRange * col / numV;
+                    long colEnd = startTime + timeRange * (col + 1) / numV;
+
+                    int idxStart = lowerBound(tradeTimes, colStart);
+                    int idxEnd = Math.min(lowerBound(tradeTimes, colEnd), tradeTimes.size());
+
+                    double volume = 0;
+                    double runningDelta = 0;
+                    double maxDelta = 0;
+                    double minDelta = 0;
+
+                    for (int i = idxStart; i < idxEnd; i++) {
+                        double sz = tradeSizes.get(i);
+                        volume += sz;
+                        runningDelta += tradeIsBuy.get(i) ? sz : -sz;
+                        maxDelta = Math.max(maxDelta, runningDelta);
+                        minDelta = Math.min(minDelta, runningDelta);
+                    }
+                    double delta = runningDelta;
+
+                    // column center X
+                    int colCenterX = PAD_LEFT + chartW * (2 * col + 1) / (2 * numV);
+
+                    String[] values = {
+                        formatDelta(delta),
+                        formatDelta(maxDelta),
+                        formatDelta(minDelta),
+                        formatVolumeDouble(volume)
+                    };
+
+                    for (int r = 0; r < values.length; r++) {
+                        double val = (r == 0) ? delta : (r == 1) ? maxDelta : (r == 2) ? minDelta : volume;
+                        if (r == 3) { // volume row — always white
+                            g2.setColor(Color.WHITE);
+                        } else {
+                            g2.setColor(val > 0 ? posColor : val < 0 ? negColor : zeroColor);
+                        }
+                        int strW = fm.stringWidth(values[r]);
+                        g2.drawString(values[r], colCenterX - strW / 2,
+                                tableTop + r * rowH + fm.getAscent());
+                    }
+
+                    // draw vertical column separators
+                    int colX = PAD_LEFT + chartW * col / numV;
+                    g2.setColor(new Color(50, 50, 60));
+                    g2.drawLine(colX, tableTop - 3, colX, tableTop + rowH * 4);
+                }
+            }
+        }
+
+        private String formatDelta(double val) {
+            String s = formatVolumeDouble(Math.abs(val));
+            if (val > 0) return "+" + s;
+            if (val < 0) return "-" + s;
+            return "0";
+        }
+
+        private String formatDuration(long ms) {
+            long sec = ms / 1000;
+            if (sec < 60) return sec + "s";
+            long min = sec / 60;
+            if (min < 60) return min + "m";
+            long hr = min / 60;
+            long remMin = min % 60;
+            if (remMin == 0) return hr + "h";
+            return hr + "h" + remMin + "m";
+        }
+
+        private void drawDepthTable(Graphics2D g2) {
+            if (bidBook == null || askBook == null) return;
+
+            double threshold = settings.depthVolumeThreshold;
+            int fontSize = settings.depthTableFontSize;
+            g2.setFont(new Font("Monospaced", Font.BOLD, fontSize));
+            FontMetrics fm = g2.getFontMetrics();
+            int lineH = fm.getHeight();
+
+            // collect high-volume bid levels (sorted by price descending — closest to market first)
+            List<int[]> bidLevels = new ArrayList<>(); // {priceTick, volume}
+            synchronized (bidBook) {
+                for (Map.Entry<Integer, Integer> e : bidBook.descendingMap().entrySet()) {
+                    if (e.getValue() >= threshold) {
+                        bidLevels.add(new int[]{e.getKey(), e.getValue()});
+                    }
+                    if (bidLevels.size() >= 10) break; // cap at 10 rows
+                }
+            }
+
+            // collect high-volume ask levels (sorted by price ascending — closest to market first)
+            List<int[]> askLevels = new ArrayList<>();
+            synchronized (askBook) {
+                for (Map.Entry<Integer, Integer> e : askBook.entrySet()) {
+                    if (e.getValue() >= threshold) {
+                        askLevels.add(new int[]{e.getKey(), e.getValue()});
+                    }
+                    if (askLevels.size() >= 10) break;
+                }
+            }
+
+            if (bidLevels.isEmpty() && askLevels.isEmpty()) return;
+
+            int maxRows = Math.max(bidLevels.size(), askLevels.size());
+            int colW = 130; // width per side
+            int tableW = colW * 2 + 10;
+            int tableH = lineH * (maxRows + 1) + 8; // +1 for header
+
+            // position: top-right of chart area
+            int w = getWidth();
+            int tx = w - PAD_RIGHT - tableW - 5;
+            int ty = PAD_TOP + 5;
+
+            // dark background
+            g2.setColor(new Color(15, 15, 25, 210));
+            g2.fillRoundRect(tx, ty, tableW, tableH, 6, 6);
+            g2.setColor(new Color(60, 60, 75));
+            g2.drawRoundRect(tx, ty, tableW, tableH, 6, 6);
+
+            // headers
+            int headerY = ty + 4 + fm.getAscent();
+            g2.setColor(settings.bidLineColor);
+            g2.drawString("BID", tx + colW / 2 - fm.stringWidth("BID") / 2, headerY);
+            g2.setColor(settings.askLineColor);
+            g2.drawString("ASK", tx + colW + 10 + colW / 2 - fm.stringWidth("ASK") / 2, headerY);
+
+            // separator line
+            g2.setColor(new Color(60, 60, 75));
+            int sepY = ty + lineH + 4;
+            g2.drawLine(tx + 4, sepY, tx + tableW - 4, sepY);
+
+            // vertical divider
+            int divX = tx + colW + 5;
+            g2.drawLine(divX, ty + 4, divX, ty + tableH - 4);
+
+            // bid side rows
+            for (int i = 0; i < bidLevels.size(); i++) {
+                int rowY = sepY + 2 + (i + 1) * lineH;
+                double price = bidLevels.get(i)[0] * pips;
+                int vol = bidLevels.get(i)[1];
+                String priceStr = String.format(priceFormat, price);
+                String volStr = formatVolumeDouble(vol);
+                String row = priceStr + " " + volStr;
+                g2.setColor(new Color(0, 180, 255));
+                g2.drawString(row, tx + colW / 2 - fm.stringWidth(row) / 2, rowY);
+            }
+
+            // ask side rows
+            for (int i = 0; i < askLevels.size(); i++) {
+                int rowY = sepY + 2 + (i + 1) * lineH;
+                double price = askLevels.get(i)[0] * pips;
+                int vol = askLevels.get(i)[1];
+                String priceStr = String.format(priceFormat, price);
+                String volStr = formatVolumeDouble(vol);
+                String row = priceStr + " " + volStr;
+                g2.setColor(new Color(255, 100, 100));
+                g2.drawString(row, tx + colW + 10 + colW / 2 - fm.stringWidth(row) / 2, rowY);
             }
         }
 

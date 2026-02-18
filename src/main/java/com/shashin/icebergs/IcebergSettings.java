@@ -53,6 +53,13 @@ public class IcebergSettings {
     public volatile double v3ExecRatioThreshold = 10.0;
     public volatile double v3TotalFilledThreshold = 10;
 
+    // --- Delta Table ---
+    public volatile int deltaTableFontSize = 10;
+
+    // --- Depth Table ---
+    public volatile double depthVolumeThreshold = 50.0;
+    public volatile int depthTableFontSize = 10;
+
     // --- V3 Diamond Colors ---
     public volatile Color v3BidFill = new Color(50, 205, 50, 160);
     public volatile Color v3BidEdge = new Color(0, 255, 0, 230);

@@ -55,9 +55,13 @@ public class SettingsWindow extends JFrame {
         mainPanel.add(createV3DiamondSection(), gbc);
         gbc.gridy = 8;
         mainPanel.add(createDiamondSizingSection(), gbc);
+        gbc.gridy = 9;
+        mainPanel.add(createDeltaTableSection(), gbc);
+        gbc.gridy = 10;
+        mainPanel.add(createDepthTableSection(), gbc);
 
         // push everything up
-        gbc.gridy = 9;
+        gbc.gridy = 11;
         gbc.weighty = 1.0;
         mainPanel.add(new JPanel() {{
             setOpaque(false);
@@ -208,6 +212,22 @@ public class SettingsWindow extends JFrame {
                 v -> settings.diamondMaxVolume = v));
         addRow(s, 4, "Label Font Size", makeIntSpinner(settings.diamondLabelFontSize, 8, 24, 1,
                 v -> settings.diamondLabelFontSize = v));
+        return s;
+    }
+
+    private JPanel createDeltaTableSection() {
+        JPanel s = createSection("Delta Table");
+        addRow(s, 0, "Font Size", makeIntSpinner(settings.deltaTableFontSize, 6, 20, 1,
+                v -> settings.deltaTableFontSize = v));
+        return s;
+    }
+
+    private JPanel createDepthTableSection() {
+        JPanel s = createSection("Depth Table");
+        addRow(s, 0, "Volume Threshold", makeSpinner(settings.depthVolumeThreshold, 1, 10000, 10,
+                v -> settings.depthVolumeThreshold = v));
+        addRow(s, 1, "Font Size", makeIntSpinner(settings.depthTableFontSize, 6, 20, 1,
+                v -> settings.depthTableFontSize = v));
         return s;
     }
 

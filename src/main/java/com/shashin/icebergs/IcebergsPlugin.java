@@ -61,8 +61,12 @@ public class IcebergsPlugin implements
         bidBooks.put(alias, new TreeMap<>());
         askBooks.put(alias, new TreeMap<>());
 
+        TreeMap<Integer, Integer> bidBook = bidBooks.get(alias);
+        TreeMap<Integer, Integer> askBook = askBooks.get(alias);
+
         SwingUtilities.invokeLater(() -> {
             BidAskWindow window = new BidAskWindow(alias, info.pips, settings);
+            window.setDepthBooks(bidBook, askBook);
             windows.put(alias, window);
             window.setVisible(true);
         });
@@ -183,6 +187,11 @@ public class IcebergsPlugin implements
         IcebergV3Detector v3Detector = v3Detectors.get(alias);
         if (v3Detector != null) {
             v3Detector.addTrade(priceTicks, actualSize, tradeInfo.isBidAggressor);
+        }
+
+        BidAskWindow window = windows.get(alias);
+        if (window != null) {
+            window.addTrade(System.currentTimeMillis(), actualSize, tradeInfo.isBidAggressor);
         }
     }
 
