@@ -432,7 +432,7 @@ public class BidAskWindow extends JFrame {
         private static final int PAD_LEFT = 60;
         private static final int PAD_RIGHT = 15;
         private static final int PAD_TOP = 15;
-        private static final int PAD_BOTTOM = 85;
+        private static final int PAD_BOTTOM = 115;
 
         private static final double ZOOM_STEP = 1.15;
         private static final double MIN_ZOOM = 1e-6;
@@ -730,6 +730,9 @@ public class BidAskWindow extends JFrame {
 
                 // high-volume depth table at top-right
                 drawDepthTable(g2);
+
+                // bid/ask imbalance meter bar (below delta table)
+                drawImbalanceMeter(g2, chartW, chartH);
 
                 // grid column width indicator (lower-left)
                 long colMs = (endTime - startTime) / 7;
@@ -1199,6 +1202,95 @@ public class BidAskWindow extends JFrame {
             long remMin = min % 60;
             if (remMin == 0) return hr + "h";
             return hr + "h" + remMin + "m";
+        }
+
+        /**
+         * Jigsaw DayTrader-style bid/ask imbalance meter.
+         * Shows total bid depth vs total ask depth from the live order books
+         * as a split percentage bar below the delta table.
+         */
+        private void drawImbalanceMeter(Graphics2D g2, int chartW, int chartH) {
+            if (bidBook == null || askBook == null) return;
+
+            double bidTotal = 0, askTotal = 0;
+            synchronized (bidBook) {
+                for (int vol : bidBook.values()) bidTotal += vol;
+            }
+            synchronized (askBook) {
+                for (int vol : askBook.values()) askTotal += vol;
+            }
+            double total = bidTotal + askTotal;
+            if (total <= 0) return;
+
+            double bidPct = bidTotal / total;
+            double askPct = 1.0 - bidPct;
+
+            // Position: below the 4-row delta table (rowH=14, tableTop=PAD_TOP+chartH+18)
+            int meterTop = PAD_TOP + chartH + 18 + 4 * 14 + 8;
+            int meterH = 24;
+            int mx = PAD_LEFT;
+            int mw = chartW;
+            int bidW = (int) (mw * bidPct);
+            int askW = mw - bidW;
+
+            // Row label in left margin
+            g2.setFont(new Font("Monospaced", Font.BOLD, settings.deltaTableFontSize));
+            FontMetrics lFm = g2.getFontMetrics();
+            g2.setColor(new Color(140, 140, 150));
+            g2.drawString("Depth", 2, meterTop + (meterH + lFm.getAscent()) / 2 - 2);
+
+            // Dark background
+            g2.setColor(new Color(25, 25, 38));
+            g2.fillRoundRect(mx, meterTop, mw, meterH, 8, 8);
+
+            // Clip to rounded rect so both fill segments inherit the rounded corners
+            Shape oldClip = g2.getClip();
+            g2.setClip(new java.awt.geom.RoundRectangle2D.Float(mx, meterTop, mw, meterH, 8, 8));
+
+            // Bid half — blue
+            g2.setColor(new Color(0, 110, 240, 230));
+            g2.fillRect(mx, meterTop, bidW, meterH);
+
+            // Ask half — red
+            g2.setColor(new Color(210, 40, 40, 230));
+            g2.fillRect(mx + bidW, meterTop, askW, meterH);
+
+            g2.setClip(oldClip);
+
+            // Center divider
+            g2.setColor(new Color(255, 255, 255, 210));
+            g2.setStroke(new BasicStroke(2f));
+            g2.drawLine(mx + bidW, meterTop + 3, mx + bidW, meterTop + meterH - 3);
+
+            // Border
+            g2.setColor(new Color(80, 80, 105));
+            g2.setStroke(new BasicStroke(1f));
+            g2.drawRoundRect(mx, meterTop, mw, meterH, 8, 8);
+
+            // Text labels — bold, white, centered in each half
+            g2.setFont(new Font("SansSerif", Font.BOLD, 12));
+            FontMetrics fm = g2.getFontMetrics();
+            int textY = meterTop + (meterH + fm.getAscent()) / 2 - 2;
+            g2.setColor(Color.WHITE);
+
+            // Bid label (left half): "BID 68%  12.5K"
+            String bidStr = String.format("BID  %.0f%%   %s", bidPct * 100, formatVolumeDouble(bidTotal));
+            String bidShort = String.format("%.0f%%", bidPct * 100);
+            if (fm.stringWidth(bidStr) < bidW - 8) {
+                g2.drawString(bidStr, mx + bidW / 2 - fm.stringWidth(bidStr) / 2, textY);
+            } else if (fm.stringWidth(bidShort) < bidW - 4) {
+                g2.drawString(bidShort, mx + bidW / 2 - fm.stringWidth(bidShort) / 2, textY);
+            }
+
+            // Ask label (right half): "8.2K   32%  ASK"
+            String askStr = String.format("%s   %.0f%%  ASK", formatVolumeDouble(askTotal), askPct * 100);
+            String askShort = String.format("%.0f%%", askPct * 100);
+            int askX = mx + bidW;
+            if (fm.stringWidth(askStr) < askW - 8) {
+                g2.drawString(askStr, askX + askW / 2 - fm.stringWidth(askStr) / 2, textY);
+            } else if (fm.stringWidth(askShort) < askW - 4) {
+                g2.drawString(askShort, askX + askW / 2 - fm.stringWidth(askShort) / 2, textY);
+            }
         }
 
         private void drawDepthTable(Graphics2D g2) {
