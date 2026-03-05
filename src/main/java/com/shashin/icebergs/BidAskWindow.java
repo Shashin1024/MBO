@@ -3,6 +3,7 @@ package com.shashin.icebergs;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.Composite;
 import java.awt.geom.Path2D;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -49,9 +50,43 @@ public class BidAskWindow extends JFrame {
     private final List<Double> tradeSizes = new ArrayList<>();
     private final List<Boolean> tradeIsBuy = new ArrayList<>(); // true = buy aggressor
 
+    // big volume trade bubbles
+    private final List<Long> bigTradeTimes = new ArrayList<>();
+    private final List<Double> bigTradePrices = new ArrayList<>();
+    private final List<Double> bigTradeVolumes = new ArrayList<>();
+    private final List<Boolean> bigTradeIsBuy = new ArrayList<>();
+
+    // Depth heatmap bars: each bar spans from when a level crossed above the threshold
+    // until it was completely removed (volume = 0). Active bars have endTime = Long.MAX_VALUE.
+    private static class DepthBar {
+        final long startTime;
+        final double price;
+        final double startVol;
+        final boolean isBid;
+        long endTime = Long.MAX_VALUE; // Long.MAX_VALUE = still active
+        double endVol = 0;
+
+        DepthBar(long startTime, double price, double startVol, boolean isBid) {
+            this.startTime = startTime;
+            this.price = price;
+            this.startVol = startVol;
+            this.isBid = isBid;
+        }
+
+        boolean isActive() { return endTime == Long.MAX_VALUE; }
+    }
+
+    // All depth bars (completed + active), ordered by startTime for trimming.
+    // Also protected by synchronized(depthBars).
+    private final List<DepthBar> depthBars = new ArrayList<>();
+    // Quick lookup of the currently active bar for each price level.
+    private final Map<Double, DepthBar> activeDepthBars = new java.util.HashMap<>();
+
     // enough for a full trading session (~8+ hours at high frequency)
     private static final int MAX_POINTS = 1_000_000;
     private static final int TRIM_BATCH = 50_000; // trim in bulk for efficiency
+    private static final int DOWNSAMPLE_FACTOR = 10; // keep every Nth point when trimming
+    private static final long MAX_RETENTION_MS = 24L * 3600 * 1000; // keep at most 24 hours of data
 
     private final Timer repaintTimer;
 
@@ -123,11 +158,19 @@ public class BidAskWindow extends JFrame {
             bidPrices.add(bid);
             askPrices.add(ask);
 
+            // trim entries older than 24 hours
+            long cutoff = now - MAX_RETENTION_MS;
+            if (!timestamps.isEmpty() && timestamps.get(0) < cutoff) {
+                int idx = lowerBoundAge(timestamps, cutoff);
+                if (idx > 0) {
+                    timestamps.subList(0, idx).clear();
+                    bidPrices.subList(0, idx).clear();
+                    askPrices.subList(0, idx).clear();
+                }
+            }
+
             if (timestamps.size() > MAX_POINTS) {
-                int excess = TRIM_BATCH;
-                timestamps.subList(0, excess).clear();
-                bidPrices.subList(0, excess).clear();
-                askPrices.subList(0, excess).clear();
+                downsamplePriceData(TRIM_BATCH);
             }
         }
 
@@ -141,6 +184,120 @@ public class BidAskWindow extends JFrame {
         });
     }
 
+    /**
+     * Downsample the oldest 'count' points by keeping every Nth,
+     * preserving min/max per group so the chart line shape is maintained.
+     * Must be called while holding the timestamps lock.
+     */
+    private void downsamplePriceData(int count) {
+        int end = Math.min(count, timestamps.size());
+        List<Long> kept = new ArrayList<>();
+        List<Double> keptBid = new ArrayList<>();
+        List<Double> keptAsk = new ArrayList<>();
+
+        for (int i = 0; i < end; i += DOWNSAMPLE_FACTOR) {
+            // For each group of DOWNSAMPLE_FACTOR points, keep the one
+            // with the widest bid-ask range (preserves price extremes)
+            int groupEnd = Math.min(i + DOWNSAMPLE_FACTOR, end);
+            int bestIdx = i;
+            double bestRange = 0;
+            for (int j = i; j < groupEnd; j++) {
+                double range = Math.abs(askPrices.get(j) - bidPrices.get(j));
+                if (range > bestRange || j == i) {
+                    bestRange = range;
+                    bestIdx = j;
+                }
+            }
+            kept.add(timestamps.get(bestIdx));
+            keptBid.add(bidPrices.get(bestIdx));
+            keptAsk.add(askPrices.get(bestIdx));
+        }
+
+        // Remove the original batch, then prepend downsampled data
+        timestamps.subList(0, end).clear();
+        bidPrices.subList(0, end).clear();
+        askPrices.subList(0, end).clear();
+        timestamps.addAll(0, kept);
+        bidPrices.addAll(0, keptBid);
+        askPrices.addAll(0, keptAsk);
+    }
+
+    /** Downsample 3-column data (trades): keep every Nth point, picking the largest size per group. */
+    private static <T> void downsampleList3(List<Long> times, List<Double> values, List<T> flags, int count) {
+        int end = Math.min(count, times.size());
+        List<Long> kT = new ArrayList<>();
+        List<Double> kV = new ArrayList<>();
+        List<T> kF = new ArrayList<>();
+
+        for (int i = 0; i < end; i += DOWNSAMPLE_FACTOR) {
+            int groupEnd = Math.min(i + DOWNSAMPLE_FACTOR, end);
+            int bestIdx = i;
+            double bestVal = 0;
+            for (int j = i; j < groupEnd; j++) {
+                if (values.get(j) > bestVal) {
+                    bestVal = values.get(j);
+                    bestIdx = j;
+                }
+            }
+            kT.add(times.get(bestIdx));
+            kV.add(values.get(bestIdx));
+            kF.add(flags.get(bestIdx));
+        }
+        times.subList(0, end).clear();
+        values.subList(0, end).clear();
+        flags.subList(0, end).clear();
+        times.addAll(0, kT);
+        values.addAll(0, kV);
+        flags.addAll(0, kF);
+    }
+
+    /** Downsample 4-column data (big trades): keep every Nth, picking largest volume per group. */
+    private static <T> void downsampleList4(List<Long> times, List<Double> prices, List<Double> volumes, List<T> flags, int count) {
+        int end = Math.min(count, times.size());
+        List<Long> kT = new ArrayList<>();
+        List<Double> kP = new ArrayList<>();
+        List<Double> kV = new ArrayList<>();
+        List<T> kF = new ArrayList<>();
+
+        for (int i = 0; i < end; i += DOWNSAMPLE_FACTOR) {
+            int groupEnd = Math.min(i + DOWNSAMPLE_FACTOR, end);
+            int bestIdx = i;
+            double bestVol = 0;
+            for (int j = i; j < groupEnd; j++) {
+                if (volumes.get(j) > bestVol) {
+                    bestVol = volumes.get(j);
+                    bestIdx = j;
+                }
+            }
+            kT.add(times.get(bestIdx));
+            kP.add(prices.get(bestIdx));
+            kV.add(volumes.get(bestIdx));
+            kF.add(flags.get(bestIdx));
+        }
+        times.subList(0, end).clear();
+        prices.subList(0, end).clear();
+        volumes.subList(0, end).clear();
+        flags.subList(0, end).clear();
+        times.addAll(0, kT);
+        prices.addAll(0, kP);
+        volumes.addAll(0, kV);
+        flags.addAll(0, kF);
+    }
+
+    /**
+     * Binary search: returns the first index i where times.get(i) >= cutoff.
+     * Used to find how many leading entries are older than cutoff.
+     */
+    private static int lowerBoundAge(List<Long> times, long cutoff) {
+        int lo = 0, hi = times.size();
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (times.get(mid) < cutoff) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
     public void addIceberg(double price, double totalFilled, double executionRatio, boolean isBid, long timestamp) {
         synchronized (icebergTimes) {
             icebergTimes.add(timestamp);
@@ -148,6 +305,16 @@ public class BidAskWindow extends JFrame {
             icebergVolumes.add(totalFilled);
             icebergExecRatios.add(executionRatio);
             icebergIsBid.add(isBid);
+
+            long cutoff = timestamp - MAX_RETENTION_MS;
+            int idx = lowerBoundAge(icebergTimes, cutoff);
+            if (idx > 0) {
+                icebergTimes.subList(0, idx).clear();
+                icebergPrices.subList(0, idx).clear();
+                icebergVolumes.subList(0, idx).clear();
+                icebergExecRatios.subList(0, idx).clear();
+                icebergIsBid.subList(0, idx).clear();
+            }
         }
     }
 
@@ -158,6 +325,38 @@ public class BidAskWindow extends JFrame {
             v3Volumes.add(totalFilled);
             v3ExecRatios.add(executionRatio);
             v3IsBid.add(isBid);
+
+            long cutoff = timestamp - MAX_RETENTION_MS;
+            int idx = lowerBoundAge(v3Times, cutoff);
+            if (idx > 0) {
+                v3Times.subList(0, idx).clear();
+                v3Prices.subList(0, idx).clear();
+                v3Volumes.subList(0, idx).clear();
+                v3ExecRatios.subList(0, idx).clear();
+                v3IsBid.subList(0, idx).clear();
+            }
+        }
+    }
+
+    public void addBigTrade(long time, double price, double size, boolean isBuy) {
+        synchronized (bigTradeTimes) {
+            bigTradeTimes.add(time);
+            bigTradePrices.add(price);
+            bigTradeVolumes.add(size);
+            bigTradeIsBuy.add(isBuy);
+
+            long cutoff = time - MAX_RETENTION_MS;
+            int idx = lowerBoundAge(bigTradeTimes, cutoff);
+            if (idx > 0) {
+                bigTradeTimes.subList(0, idx).clear();
+                bigTradePrices.subList(0, idx).clear();
+                bigTradeVolumes.subList(0, idx).clear();
+                bigTradeIsBuy.subList(0, idx).clear();
+            }
+
+            if (bigTradeTimes.size() > MAX_POINTS) {
+                downsampleList4(bigTradeTimes, bigTradePrices, bigTradeVolumes, bigTradeIsBuy, TRIM_BATCH);
+            }
         }
     }
 
@@ -167,11 +366,16 @@ public class BidAskWindow extends JFrame {
             tradeSizes.add(size);
             tradeIsBuy.add(isBuy);
 
+            long cutoff = time - MAX_RETENTION_MS;
+            int idx = lowerBoundAge(tradeTimes, cutoff);
+            if (idx > 0) {
+                tradeTimes.subList(0, idx).clear();
+                tradeSizes.subList(0, idx).clear();
+                tradeIsBuy.subList(0, idx).clear();
+            }
+
             if (tradeTimes.size() > MAX_POINTS) {
-                int excess = TRIM_BATCH;
-                tradeTimes.subList(0, excess).clear();
-                tradeSizes.subList(0, excess).clear();
-                tradeIsBuy.subList(0, excess).clear();
+                downsampleList3(tradeTimes, tradeSizes, tradeIsBuy, TRIM_BATCH);
             }
         }
     }
@@ -179,6 +383,33 @@ public class BidAskWindow extends JFrame {
     public void setDepthBooks(TreeMap<Integer, Integer> bidBook, TreeMap<Integer, Integer> askBook) {
         this.bidBook = bidBook;
         this.askBook = askBook;
+    }
+
+    public void addDepthEvent(long time, double price, double volume, boolean isBid, boolean appeared) {
+        synchronized (depthBars) {
+            if (appeared) {
+                DepthBar bar = new DepthBar(time, price, volume, isBid);
+                depthBars.add(bar);
+                activeDepthBars.put(price, bar);
+            } else {
+                DepthBar bar = activeDepthBars.remove(price);
+                if (bar != null) {
+                    bar.endTime = time;
+                    bar.endVol = volume;
+                }
+            }
+
+            // Trim completed bars older than 24 hours from the front
+            // (active bars are never trimmed regardless of age)
+            long cutoff = time - MAX_RETENTION_MS;
+            int trim = 0;
+            while (trim < depthBars.size()
+                    && depthBars.get(trim).startTime < cutoff
+                    && !depthBars.get(trim).isActive()) {
+                trim++;
+            }
+            if (trim > 0) depthBars.subList(0, trim).clear();
+        }
     }
 
     private void openSettings() {
@@ -403,7 +634,9 @@ public class BidAskWindow extends JFrame {
 
                 long now = System.currentTimeMillis();
                 long visibleMs = (long) (settings.visibleSeconds * 1000L / horizontalZoom);
-                long endTime = now - timeOffset;
+                // Shift endTime one column (1/7 of visible range) past now so live data
+                // ends at column 6, leaving column 7 as blank right-side padding.
+                long endTime = now - timeOffset + visibleMs / 7;
                 long startTime = endTime - visibleMs;
 
                 // find auto-fit price range over visible window (binary search for range)
@@ -413,7 +646,7 @@ public class BidAskWindow extends JFrame {
                 double minPrice = Double.MAX_VALUE;
                 double maxPrice = -Double.MAX_VALUE;
 
-                // scan all visible points — only arithmetic, no graphics, so fast enough
+                // scan all visible bid/ask points
                 for (int i = idxStart; i < idxEnd; i++) {
                     double bid = bidPrices.get(i);
                     double ask = askPrices.get(i);
@@ -422,9 +655,15 @@ public class BidAskWindow extends JFrame {
                 }
 
                 if (minPrice >= maxPrice) {
-                    double mid = (minPrice + maxPrice) / 2.0;
-                    minPrice = mid - pips * 5;
-                    maxPrice = mid + pips * 5;
+                    // No data points visible — fall back to the last known bid/ask
+                    double lastBid = bidPrices.isEmpty() ? 0 : bidPrices.get(bidPrices.size() - 1);
+                    double lastAsk = askPrices.isEmpty() ? 0 : askPrices.get(askPrices.size() - 1);
+                    double mid = (lastBid > 0 && lastAsk > 0)
+                            ? (lastBid + lastAsk) / 2.0
+                            : Math.max(lastBid, lastAsk);
+                    if (mid <= 0) mid = pips * 50;
+                    minPrice = mid - pips * 10;
+                    maxPrice = mid + pips * 10;
                 }
 
                 // apply vertical zoom around the midpoint
@@ -449,10 +688,16 @@ public class BidAskWindow extends JFrame {
                 drawPriceLine(g2, chartW, chartH, startTime, endTime, minPrice, priceRange,
                         askPrices, settings.askLineColor);
 
-                // draw completed iceberg diamonds on top (V2 then V3)
+                // depth heatmap events: appear/disappear markers
+                drawHeatmapEvents(g2, chartW, chartH, startTime, endTime, minPrice, priceRange);
+
+                // draw completed iceberg diamonds first (V2 then V3)
                 List<DiamondInfo> allDiamonds = new ArrayList<>();
                 allDiamonds.addAll(drawIcebergBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange));
                 allDiamonds.addAll(drawV3IcebergBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange));
+
+                // draw big volume trade bubbles on top of diamonds so they are always visible
+                drawBigVolumeBubbles(g2, chartW, chartH, startTime, endTime, minPrice, priceRange);
 
                 // collision-avoidance labels, then hover tooltip
                 drawLabelsWithCollisionAvoidance(g2, allDiamonds);
@@ -487,7 +732,7 @@ public class BidAskWindow extends JFrame {
                 drawDepthTable(g2);
 
                 // grid column width indicator (lower-left)
-                long colMs = (endTime - startTime) / 6;
+                long colMs = (endTime - startTime) / 7;
                 String colLabel = formatDuration(colMs);
                 g2.setFont(new Font("SansSerif", Font.PLAIN, 10));
                 g2.setColor(new Color(140, 140, 150, 180));
@@ -530,6 +775,131 @@ public class BidAskWindow extends JFrame {
             return (int) (minR + norm * (maxR - minR));
         }
 
+        private int bubbleRadius(double volume) {
+            double minVol = settings.bubbleMinVolume;
+            double maxVol = settings.bubbleMaxVolume;
+            double minR = settings.bubbleMinRadius;
+            double maxR = settings.bubbleMaxRadius;
+            double clamped = Math.max(minVol, Math.min(maxVol, volume));
+            double norm = Math.log(clamped / minVol) / Math.log(maxVol / minVol);
+            return (int) (minR + norm * (maxR - minR));
+        }
+
+        private void drawBigVolumeBubbles(Graphics2D g2, int chartW, int chartH,
+                                           long startTime, long endTime,
+                                           double minPrice, double priceRange) {
+            long timeRange = endTime - startTime;
+            if (timeRange <= 0) return;
+
+            synchronized (bigTradeTimes) {
+                if (bigTradeTimes.isEmpty()) return;
+
+                int idxStart = lowerBound(bigTradeTimes, startTime);
+                int idxEnd = Math.min(lowerBound(bigTradeTimes, endTime + 1), bigTradeTimes.size());
+
+                Composite origComposite = g2.getComposite();
+
+                double maxPrice = minPrice + priceRange;
+                for (int i = idxStart; i < idxEnd; i++) {
+                    long t = bigTradeTimes.get(i);
+                    double price = bigTradePrices.get(i);
+                    if (price < minPrice || price > maxPrice) continue;
+                    double volume = bigTradeVolumes.get(i);
+                    boolean isBuy = bigTradeIsBuy.get(i);
+
+                    int cx = toX(t, startTime, timeRange, chartW);
+                    int cy = toY(price, minPrice, priceRange, chartH);
+                    int r = bubbleRadius(volume);
+
+                    // fill
+                    g2.setColor(isBuy ? settings.bigVolumeBuyFill : settings.bigVolumeSellFill);
+                    g2.fillOval(cx - r, cy - r, r * 2, r * 2);
+                    // edge
+                    g2.setColor(isBuy ? settings.bigVolumeBuyEdge : settings.bigVolumeSellEdge);
+                    g2.setStroke(new BasicStroke(1.5f));
+                    g2.drawOval(cx - r, cy - r, r * 2, r * 2);
+                }
+
+                g2.setComposite(origComposite);
+            }
+        }
+
+        /**
+         * Returns the label color for a heatmap number based on its volume tier.
+         * Volumes below tier1 keep the default bid/ask directional colors.
+         * Volumes at or above each tier use a unified color (same for bid and ask)
+         * so traders can gauge size at a glance without needing to distinguish direction.
+         */
+        private Color heatmapLabelColor(double volume, boolean isBid) {
+            if (volume >= settings.heatmapTier3) return settings.heatmapTier3Color;
+            if (volume >= settings.heatmapTier2) return settings.heatmapTier2Color;
+            if (volume >= settings.heatmapTier1) return settings.heatmapTier1Color;
+            // default: preserve bid/ask direction distinction
+            return isBid ? new Color(150, 255, 180) : new Color(255, 160, 160);
+        }
+
+        private void drawHeatmapEvents(Graphics2D g2, int chartW, int chartH,
+                                       long startTime, long endTime,
+                                       double minPrice, double priceRange) {
+            long timeRange = endTime - startTime;
+            if (timeRange <= 0) return;
+
+            double maxPrice = minPrice + priceRange;
+            long now = System.currentTimeMillis();
+
+            g2.setFont(new Font("Monospaced", Font.BOLD, settings.heatmapLabelFontSize));
+            FontMetrics fm = g2.getFontMetrics();
+            int barH = 4;
+
+            synchronized (depthBars) {
+                for (DepthBar bar : depthBars) {
+                    if (bar.price < minPrice || bar.price > maxPrice) continue;
+
+                    long barEnd = bar.isActive() ? now : bar.endTime;
+
+                    // Skip bars that don't overlap with the visible window
+                    if (bar.startTime > endTime || barEnd < startTime) continue;
+
+                    int cy = toY(bar.price, minPrice, priceRange, chartH);
+
+                    // Clamp bar to visible window for drawing
+                    long drawStart = Math.max(bar.startTime, startTime);
+                    long drawEnd = Math.min(barEnd, endTime);
+
+                    int x1 = toX(drawStart, startTime, timeRange, chartW);
+                    int x2 = toX(drawEnd, startTime, timeRange, chartW);
+                    int barWidth = Math.max(2, x2 - x1);
+
+                    // Draw the continuous horizontal bar
+                    // Active bars use the "appear" color; completed bars use a slightly faded color
+                    Color barColor = bar.isBid
+                            ? (bar.isActive() ? settings.heatmapBidAppearColor : settings.heatmapBidDisappearColor)
+                            : (bar.isActive() ? settings.heatmapAskAppearColor : settings.heatmapAskDisappearColor);
+                    g2.setColor(barColor);
+                    g2.fillRect(x1, cy - barH / 2, barWidth, barH);
+
+                    // +N label to the LEFT of the bar's start point (only if start is in visible window)
+                    if (bar.startTime >= startTime && bar.startTime <= endTime) {
+                        String plusLabel = "+" + formatVolumeDouble(bar.startVol);
+                        int labelX = toX(bar.startTime, startTime, timeRange, chartW);
+                        int labelW = fm.stringWidth(plusLabel);
+                        Color plusColor = heatmapLabelColor(bar.startVol, bar.isBid);
+                        g2.setColor(plusColor);
+                        g2.drawString(plusLabel, labelX - labelW - 3, cy + fm.getAscent() / 2);
+                    }
+
+                    // -N label to the RIGHT of the bar's end point (only if bar is completed and end is in window)
+                    if (!bar.isActive() && bar.endTime >= startTime && bar.endTime <= endTime) {
+                        String minusLabel = "-" + formatVolumeDouble(bar.endVol);
+                        int labelX = toX(bar.endTime, startTime, timeRange, chartW);
+                        Color minusColor = heatmapLabelColor(bar.endVol, bar.isBid);
+                        g2.setColor(minusColor);
+                        g2.drawString(minusLabel, labelX + 3, cy + fm.getAscent() / 2);
+                    }
+                }
+            }
+        }
+
         private List<DiamondInfo> drawIcebergBubbles(Graphics2D g2, int chartW, int chartH,
                                          long startTime, long endTime,
                                          double minPrice, double priceRange) {
@@ -538,12 +908,14 @@ public class BidAskWindow extends JFrame {
 
             synchronized (icebergTimes) {
                 if (icebergTimes.isEmpty()) return result;
+                double maxPrice = minPrice + priceRange;
 
                 for (int i = 0; i < icebergTimes.size(); i++) {
                     long t = icebergTimes.get(i);
                     if (t < startTime || t > endTime) continue;
 
                     double price = icebergPrices.get(i);
+                    if (price < minPrice || price > maxPrice) continue;
                     double volume = icebergVolumes.get(i);
                     double execRatio = icebergExecRatios.get(i);
                     boolean isBid = icebergIsBid.get(i);
@@ -580,12 +952,14 @@ public class BidAskWindow extends JFrame {
 
             synchronized (v3Times) {
                 if (v3Times.isEmpty()) return result;
+                double maxPrice = minPrice + priceRange;
 
                 for (int i = 0; i < v3Times.size(); i++) {
                     long t = v3Times.get(i);
                     if (t < startTime || t > endTime) continue;
 
                     double price = v3Prices.get(i);
+                    if (price < minPrice || price > maxPrice) continue;
                     double volume = v3Volumes.get(i);
                     double execRatio = v3ExecRatios.get(i);
                     boolean isBid = v3IsBid.get(i);
@@ -731,7 +1105,7 @@ public class BidAskWindow extends JFrame {
             long timeRange = endTime - startTime;
             if (timeRange <= 0) return;
 
-            int numV = 6; // same as drawGrid
+            int numV = 7; // same as drawGrid
             int tableTop = PAD_TOP + chartH + 18; // below time axis labels
             int rowH = 14;
 
@@ -798,11 +1172,14 @@ public class BidAskWindow extends JFrame {
                                 tableTop + r * rowH + fm.getAscent());
                     }
 
-                    // draw vertical column separators
+                    // draw vertical column separators (left edge of each column)
                     int colX = PAD_LEFT + chartW * col / numV;
                     g2.setColor(new Color(50, 50, 60));
                     g2.drawLine(colX, tableTop - 3, colX, tableTop + rowH * 4);
                 }
+                // draw the closing right-edge separator to match the grid's numV+1 lines
+                g2.setColor(new Color(50, 50, 60));
+                g2.drawLine(PAD_LEFT + chartW, tableTop - 3, PAD_LEFT + chartW, tableTop + rowH * 4);
             }
         }
 
@@ -946,7 +1323,7 @@ public class BidAskWindow extends JFrame {
 
             // price axis labels (larger font)
             g2.setFont(new Font("Monospaced", Font.BOLD, 12));
-            int numH = 6;
+            int numH = 6;  // horizontal price lines — keep as-is
             for (int i = 0; i <= numH; i++) {
                 double price = minPrice + priceRange * i / numH;
                 int y = toY(price, minPrice, priceRange, chartH);
@@ -963,7 +1340,7 @@ public class BidAskWindow extends JFrame {
             SimpleDateFormat timeFmt = timeRange < 600_000
                     ? new SimpleDateFormat("HH:mm:ss")
                     : new SimpleDateFormat("HH:mm");
-            int numV = 6;
+            int numV = 7;
             for (int i = 0; i <= numV; i++) {
                 int x = PAD_LEFT + chartW * i / numV;
                 g2.setColor(settings.gridColor);

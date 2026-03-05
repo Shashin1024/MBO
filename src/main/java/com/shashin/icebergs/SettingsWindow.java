@@ -56,12 +56,16 @@ public class SettingsWindow extends JFrame {
         gbc.gridy = 8;
         mainPanel.add(createDiamondSizingSection(), gbc);
         gbc.gridy = 9;
-        mainPanel.add(createDeltaTableSection(), gbc);
+        mainPanel.add(createBigVolumeBubbleSection(), gbc);
         gbc.gridy = 10;
+        mainPanel.add(createDeltaTableSection(), gbc);
+        gbc.gridy = 11;
         mainPanel.add(createDepthTableSection(), gbc);
+        gbc.gridy = 12;
+        mainPanel.add(createHeatmapSection(), gbc);
 
         // push everything up
-        gbc.gridy = 11;
+        gbc.gridy = 13;
         gbc.weighty = 1.0;
         mainPanel.add(new JPanel() {{
             setOpaque(false);
@@ -215,6 +219,25 @@ public class SettingsWindow extends JFrame {
         return s;
     }
 
+    private JPanel createBigVolumeBubbleSection() {
+        JPanel s = createSection("Big Volume Bubbles");
+        addRow(s, 0, "Volume Threshold", makeSpinner(settings.bigVolumeThreshold, 1, 50000, 10,
+                v -> settings.bigVolumeThreshold = v));
+        addRow(s, 1, "Buy Fill", makeColorButton(settings.bigVolumeBuyFill, c -> settings.bigVolumeBuyFill = c));
+        addRow(s, 2, "Buy Edge", makeColorButton(settings.bigVolumeBuyEdge, c -> settings.bigVolumeBuyEdge = c));
+        addRow(s, 3, "Sell Fill", makeColorButton(settings.bigVolumeSellFill, c -> settings.bigVolumeSellFill = c));
+        addRow(s, 4, "Sell Edge", makeColorButton(settings.bigVolumeSellEdge, c -> settings.bigVolumeSellEdge = c));
+        addRow(s, 5, "Min Radius", makeSpinner(settings.bubbleMinRadius, 1, 30, 1,
+                v -> settings.bubbleMinRadius = v));
+        addRow(s, 6, "Max Radius", makeSpinner(settings.bubbleMaxRadius, 5, 80, 5,
+                v -> settings.bubbleMaxRadius = v));
+        addRow(s, 7, "Min Volume (sizing)", makeSpinner(settings.bubbleMinVolume, 1, 500, 5,
+                v -> settings.bubbleMinVolume = v));
+        addRow(s, 8, "Max Volume (sizing)", makeSpinner(settings.bubbleMaxVolume, 50, 50000, 50,
+                v -> settings.bubbleMaxVolume = v));
+        return s;
+    }
+
     private JPanel createDeltaTableSection() {
         JPanel s = createSection("Delta Table");
         addRow(s, 0, "Font Size", makeIntSpinner(settings.deltaTableFontSize, 6, 20, 1,
@@ -229,6 +252,45 @@ public class SettingsWindow extends JFrame {
         addRow(s, 1, "Font Size", makeIntSpinner(settings.depthTableFontSize, 6, 20, 1,
                 v -> settings.depthTableFontSize = v));
         return s;
+    }
+
+    private JPanel createHeatmapSection() {
+        JPanel s = createSection("Depth Heatmap");
+        addRow(s, 0, "Volume Threshold", makeSpinner(settings.heatmapVolumeThreshold, 1, 10000, 5,
+                v -> settings.heatmapVolumeThreshold = v));
+        addRow(s, 1, "Bid Appear", makeColorButton(settings.heatmapBidAppearColor, c -> settings.heatmapBidAppearColor = c));
+        addRow(s, 2, "Bid Disappear", makeColorButton(settings.heatmapBidDisappearColor, c -> settings.heatmapBidDisappearColor = c));
+        addRow(s, 3, "Ask Appear", makeColorButton(settings.heatmapAskAppearColor, c -> settings.heatmapAskAppearColor = c));
+        addRow(s, 4, "Ask Disappear", makeColorButton(settings.heatmapAskDisappearColor, c -> settings.heatmapAskDisappearColor = c));
+        addRow(s, 5, "Label Font Size", makeIntSpinner(settings.heatmapLabelFontSize, 6, 20, 1,
+                v -> settings.heatmapLabelFontSize = v));
+
+        // Label color tiers — numbers change color based on volume size
+        addSeparatorRow(s, 6, "— Label Color Tiers —");
+        addRow(s, 7,  "Tier 1 threshold (≥)",  makeSpinner(settings.heatmapTier1, 1, 10000, 5,
+                v -> settings.heatmapTier1 = v));
+        addRow(s, 8,  "Tier 1 color",           makeColorButton(settings.heatmapTier1Color, c -> settings.heatmapTier1Color = c));
+        addRow(s, 9,  "Tier 2 threshold (≥)",  makeSpinner(settings.heatmapTier2, 1, 10000, 5,
+                v -> settings.heatmapTier2 = v));
+        addRow(s, 10, "Tier 2 color",           makeColorButton(settings.heatmapTier2Color, c -> settings.heatmapTier2Color = c));
+        addRow(s, 11, "Tier 3 threshold (≥)",  makeSpinner(settings.heatmapTier3, 1, 10000, 5,
+                v -> settings.heatmapTier3 = v));
+        addRow(s, 12, "Tier 3 color",           makeColorButton(settings.heatmapTier3Color, c -> settings.heatmapTier3Color = c));
+        return s;
+    }
+
+    /** Renders a full-width separator label row inside a section. */
+    private void addSeparatorRow(JPanel section, int row, String text) {
+        GridBagConstraints gc = new GridBagConstraints();
+        gc.gridx = 0;
+        gc.gridy = row;
+        gc.gridwidth = 2;
+        gc.fill = GridBagConstraints.HORIZONTAL;
+        gc.insets = new Insets(6, 8, 2, 8);
+        JLabel sep = new JLabel(text);
+        sep.setForeground(new Color(120, 125, 135));
+        sep.setFont(new Font("SansSerif", Font.ITALIC, 10));
+        section.add(sep, gc);
     }
 
     // ---- Control Builders ----

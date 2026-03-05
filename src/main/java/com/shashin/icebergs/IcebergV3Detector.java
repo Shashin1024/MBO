@@ -183,6 +183,13 @@ public class IcebergV3Detector {
                 String orderId = e.getKey();
                 IcebergV3Order order = e.getValue();
                 confirmedIds.remove(orderId);
+
+                // Fire diamond for confirmed icebergs that expired without a cancel event
+                if (order.isConfirmedIceberg && onIcebergCompleted != null) {
+                    order.completionTime = now;
+                    onIcebergCompleted.accept(new CompletedIcebergV3(order, pips));
+                }
+
                 for (double priceD : order.priceHistory) {
                     int priceTick = (int) priceD;
                     List<String> list = ordersByPrice.get(priceTick);

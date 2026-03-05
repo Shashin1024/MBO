@@ -287,10 +287,7 @@ public class IcebergDetector {
         order.isConfirmedIceberg = true;
         order.icebergStartTime = System.currentTimeMillis();
         confirmedIds.add(order.orderId);
-        // Fire callback immediately on confirmation (not just on cancel)
-        if (onIcebergCompleted != null) {
-            onIcebergCompleted.accept(new CompletedIceberg(order, pips));
-        }
+        // Diamond emitted on cancel/completion, not here — avoids double-draw and mid-order scatter
     }
 
     // Distance from best bid/ask (matches Python _get_distance_from_best exactly)
@@ -311,6 +308,12 @@ public class IcebergDetector {
                 String orderId = e.getKey();
                 IcebergOrder order = e.getValue();
                 confirmedIds.remove(orderId);
+
+                // Fire diamond for confirmed icebergs that expired without a cancel event
+                if (order.isConfirmedIceberg && onIcebergCompleted != null) {
+                    order.completionTime = now;
+                    onIcebergCompleted.accept(new CompletedIceberg(order, pips));
+                }
 
                 // Clean up from ordersByPrice
                 for (double priceD : order.priceHistory) {
