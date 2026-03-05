@@ -845,7 +845,6 @@ public class BidAskWindow extends JFrame {
             if (timeRange <= 0) return;
 
             double maxPrice = minPrice + priceRange;
-            long now = System.currentTimeMillis();
 
             g2.setFont(new Font("Monospaced", Font.BOLD, settings.heatmapLabelFontSize));
             FontMetrics fm = g2.getFontMetrics();
@@ -855,7 +854,8 @@ public class BidAskWindow extends JFrame {
                 for (DepthBar bar : depthBars) {
                     if (bar.price < minPrice || bar.price > maxPrice) continue;
 
-                    long barEnd = bar.isActive() ? now : bar.endTime;
+                    // Active bars extend to the full right edge of the chart (endTime)
+                    long barEnd = bar.isActive() ? endTime : bar.endTime;
 
                     // Skip bars that don't overlap with the visible window
                     if (bar.startTime > endTime || barEnd < startTime) continue;
